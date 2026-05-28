@@ -146,13 +146,23 @@ def _circuit_y(rows, pat=None):
 
 # ── Main parser ───────────────────────────────────────────────────────────────
 
-def parse_board(rows, board_id_hint=None):
+def parse_board(rows, board_id_hint=None, bbox=None):
     fmt  = _detect_circuit_fmt(rows)
     cmap = _build_cmap(rows, fmt)
     pat  = _pat_for_fmt(fmt)
 
-    # Compute relative Y reference from circuit labels
-    cy = _circuit_y(rows, pat) or 0.0
+    # Compute relative Y reference from circuit labels.
+    # When bbox=(x0,y0,x1,y1) is supplied, restrict cy to rows that are
+    # inside the actual frame bounds (± 100 units).  This prevents orphan
+    # text entities from adjacent Y-rows — captured via BOTTOM_MARGIN in
+    # detect_panels — from skewing the mean and placing the board-ID search
+    # window in the wrong place.
+    if bbox is not None:
+        bx0, by0, bx1, by1 = bbox
+        in_frame_rows = [r for r in rows if by0 - 100 <= r['y'] <= by1 + 100]
+        cy = _circuit_y(in_frame_rows, pat) or _circuit_y(rows, pat) or 0.0
+    else:
+        cy = _circuit_y(rows, pat) or 0.0
 
     bid_y_lo = cy + BOARD_ID_OFFSET[0];   bid_y_hi = cy + BOARD_ID_OFFSET[1]
     sub_y_lo = cy + SUBBOARD_OFFSET[0];   sub_y_hi = cy + SUBBOARD_OFFSET[1]
@@ -372,5 +382,35 @@ def parse_board(rows, board_id_hint=None):
         n += 1
     if info['busbar']:
         info['acc'].append((str(n), 'Insulated CU Busbar', info['busbar'], '1 set', ''))
+
+    # ── Fallback: board ID near frame top ─────────────────────────────────────
+    # In some drawings the board title is placed very close to the top edge of
+    # the cabinet border rectangle rather than at the standard cy-based offset.
+    # When bbox is supplied and no ID was found yet, scan rows within 1200 units
+    # of the frame top (y1) or 5000 units below the frame bottom (y0).
+    if not info['id'] and bbox is not None:
+        bx0, by0, bx1, by1 = bbox
+        _bid_re = re.compile(r'^D\d+-(SB|MDB|DB)-')
+
+        # Primary: near frame top (board title block is at the top of the schedule)
+        top_cands = [
+            r['t'] for r in rows
+            if r['rot'] == '0' and by1 - 1200 <= r['y'] <= by1 + 100
+            and _bid_re.match(r['t'])
+        ]
+        if top_cands:
+            info['id'] = top_cands[0]
+
+        # Secondary: below frame bottom (board title sometimes printed under
+        # the border rectangle rather than inside it)
+        if not info['id']:
+            bot_cands = [
+                r['t'] for r in rows
+                if r['rot'] == '0' and by0 - 5000 <= r['y'] <= by0 - 100
+                and _bid_re.match(r['t'])
+            ]
+            if len(bot_cands) == 1:
+                # Only assign when exactly one candidate (avoids sub-board-list frames)
+                info['id'] = bot_cands[0]
 
     return info

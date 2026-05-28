@@ -26,6 +26,17 @@ _ACAD_PM   = re.compile(r'%%[pP]')
 _ACAD_DIA  = re.compile(r'%%[cC]')
 _ACAD_MISC = re.compile(r'%%\d{3}')                    # numeric code fallback
 
+# MText stacking: \S<numerator>^<denominator>; becomes "<numerator>^<denominator>"
+# after plain_text(). For superscripts the denominator is blank/space, so we
+# see patterns like "2^ " → convert to Unicode superscript "²".
+_STACKING_CARET = re.compile(r'(\d+)\^\s?')
+_SUPERSCRIPT_MAP = str.maketrans('0123456789', '⁰¹²³⁴⁵⁶⁷⁸⁹')
+
+
+def _fix_superscripts(text: str) -> str:
+    """Convert MText stacking remnants (e.g. '2^ ') to Unicode superscripts ('²')."""
+    return _STACKING_CARET.sub(lambda m: m.group(1).translate(_SUPERSCRIPT_MAP), text)
+
 
 def _strip_acad_codes(text: str) -> str:
     """Remove AutoCAD inline formatting codes from a raw TEXT entity value."""
@@ -84,6 +95,7 @@ def parse_dxf(path: str) -> list[dict]:
             layer = e.dxf.layer
         elif dt == 'MTEXT':
             text  = e.plain_text().replace('\n', ' ').replace('\r', ' ')
+            text  = _fix_superscripts(text)
             text  = ' '.join(text.split()).strip()
             ins   = e.dxf.insert
             rot   = _norm_rot(_mtext_angle(e))

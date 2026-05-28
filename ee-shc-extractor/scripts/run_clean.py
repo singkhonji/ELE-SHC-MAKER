@@ -45,7 +45,7 @@ def run_clean(input_paths: list, output_path: str = None) -> str:
         print(f"        {len(panels)} cabinet(s) detected by border")
 
         for p in panels:
-            bdata = parse_board(p['rows'])
+            bdata = parse_board(p['rows'], bbox=p['bbox'])
             if not bdata['id']:
                 bdata['id'] = f'CABINET_{len(all_boards) + 1}'
             print(f"        {bdata['id']:28} ({len(bdata['circuits'])} circuits)")

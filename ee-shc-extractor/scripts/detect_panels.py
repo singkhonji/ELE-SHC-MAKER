@@ -19,19 +19,39 @@ import sys
 import os
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-FRAME_MIN_HEIGHT_FRAC = 0.60   # frame height must exceed this fraction of total drawing height
+FRAME_MIN_HEIGHT_FRAC = 0.15   # frame height must exceed this fraction of total drawing height
+                                # NOTE: In multi-row layouts, each cabinet row is ~22% of total
+                                #       drawing height, so 0.15 captures all rows without
+                                #       including tiny symbol boxes (next largest is ~0.13).
 FRAME_MIN_WIDTH       = 2_000  # ignore tiny rectangles (symbols, cells)
-ASSIGN_MARGIN         = 200     # tolerance (drawing units) when testing containment
+ASSIGN_MARGIN         = 200    # horizontal / top tolerance (drawing units)
+BOTTOM_MARGIN         = 5_000  # downward tolerance below frame bottom (drawing units)
+                                # NOTE: In many drawings the board-ID label is drawn ~3000-4500
+                                #       units BELOW the cabinet border rectangle, so a large
+                                #       BOTTOM_MARGIN is required while keeping X/top margins
+                                #       small to avoid mixing data from adjacent cabinets.
+BORDER_LAYER          = 'DB_BOARDER'  # When this layer exists, use ONLY its rectangles as
+                                       # cabinet borders (human-drawn, no size filtering needed).
 
 
 def _lwpolyline_bboxes(dxf_path: str):
-    """Return [(x0, y0, x1, y1), ...] bounding boxes of every LWPOLYLINE."""
+    """Return [(x0, y0, x1, y1), ...] bounding boxes of LWPOLYLINE cabinet borders.
+
+    If the drawing contains a layer named BORDER_LAYER (e.g. 'DB_BOARDER'),
+    only rectangles on that layer are returned — these are human-drawn and
+    authoritative, so no size filtering is applied downstream.
+    Otherwise every LWPOLYLINE is returned and filtered by size heuristics.
+    """
     import ezdxf
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
+    layer_names = {layer.dxf.name.upper() for layer in doc.layers}
+    use_border_layer = BORDER_LAYER.upper() in layer_names
     boxes = []
     for e in msp:
         if e.dxftype() != 'LWPOLYLINE':
+            continue
+        if use_border_layer and e.dxf.layer.upper() != BORDER_LAYER.upper():
             continue
         pts = [(p[0], p[1]) for p in e.get_points()]
         if len(pts) < 2:
@@ -39,7 +59,7 @@ def _lwpolyline_bboxes(dxf_path: str):
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         boxes.append((min(xs), min(ys), max(xs), max(ys)))
-    return boxes
+    return boxes, use_border_layer
 
 
 def _total_height(boxes, rows):
@@ -59,13 +79,18 @@ def _contains(outer, inner) -> bool:
     return ox0 <= ix0 and oy0 <= iy0 and ox1 >= ix1 and oy1 >= iy1
 
 
-def _detect_frames(boxes, total_h):
+def _detect_frames(boxes, total_h, from_border_layer=False):
     """Pick the panel border rectangles from all LWPOLYLINE bboxes."""
-    min_h = FRAME_MIN_HEIGHT_FRAC * total_h
-    cands = [
-        b for b in boxes
-        if (b[3] - b[1]) >= min_h and (b[2] - b[0]) >= FRAME_MIN_WIDTH
-    ]
+    # If boxes came from the explicit DB_BOARDER layer, skip size filtering —
+    # the human already drew exactly the right rectangles.
+    if from_border_layer:
+        cands = list(boxes)
+    else:
+        min_h = FRAME_MIN_HEIGHT_FRAC * total_h
+        cands = [
+            b for b in boxes
+            if (b[3] - b[1]) >= min_h and (b[2] - b[0]) >= FRAME_MIN_WIDTH
+        ]
     # Drop any candidate that fully wraps another candidate (outer title border).
     frames = []
     for b in cands:
@@ -90,9 +115,9 @@ def _detect_frames(boxes, total_h):
 
 
 def detect_panels(dxf_path: str, rows: list[dict]) -> list[dict]:
-    boxes   = _lwpolyline_bboxes(dxf_path)
+    boxes, from_border_layer = _lwpolyline_bboxes(dxf_path)
     total_h = _total_height(boxes, rows)
-    frames  = _detect_frames(boxes, total_h) if total_h else []
+    frames  = _detect_frames(boxes, total_h, from_border_layer) if total_h else []
 
     # ── Fallback: no frames found → reuse legacy X-gap clustering ────────────
     if not frames:
@@ -104,22 +129,45 @@ def detect_panels(dxf_path: str, rows: list[dict]) -> list[dict]:
 
     def _inside(f, x, y):
         x0, y0, x1, y1 = f
+        # Asymmetric margins: small on X and top, large on bottom only.
+        # Board-ID labels are often drawn below the cabinet border rectangle.
         return (x0 - ASSIGN_MARGIN <= x <= x1 + ASSIGN_MARGIN and
-                y0 - ASSIGN_MARGIN <= y <= y1 + ASSIGN_MARGIN)
+                y0 - BOTTOM_MARGIN <= y <= y1 + ASSIGN_MARGIN)
+
+    def _in_actual(f, x, y):
+        """True if (x,y) is strictly within the panel's actual frame boundary."""
+        x0, y0, x1, y1 = f
+        return x0 <= x <= x1 and y0 <= y <= y1
 
     for r in rows:
         x, y = r['x'], r['y']
+
+        # Priority 1: strict frame containment.
+        # Never let a neighbour's extended margin steal a text that is
+        # physically inside another panel's actual border rectangle.
+        actual_hits = [i for i, p in enumerate(panels) if _in_actual(p['bbox'], x, y)]
+        if len(actual_hits) == 1:
+            panels[actual_hits[0]]['rows'].append(r)
+            continue
+        if len(actual_hits) > 1:
+            # Overlapping frames (rare): pick nearest centre from actual-frame matches.
+            def _d_act(i, _x=x, _y=y):
+                x0, y0, x1, y1 = panels[i]['bbox']
+                return (_x - (x0+x1)/2)**2 + (_y - (y0+y1)/2)**2
+            panels[min(actual_hits, key=_d_act)]['rows'].append(r)
+            continue
+
+        # Priority 2: extended margin zone (board IDs below frame, small overflows).
         hits = [i for i, p in enumerate(panels) if _inside(p['bbox'], x, y)]
         if len(hits) == 1:
             panels[hits[0]]['rows'].append(r)
         else:
-            # Outside all frames, or ambiguous: assign to nearest frame center.
-            def _d(p):
-                x0, y0, x1, y1 = p['bbox']
-                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-                return (x - cx) ** 2 + (y - cy) ** 2
-            best = min(panels, key=_d)
-            best['rows'].append(r)
+            # Ambiguous or completely outside: nearest centre.
+            candidates = hits if hits else list(range(len(panels)))
+            def _d_ext(i, _x=x, _y=y):
+                x0, y0, x1, y1 = panels[i]['bbox']
+                return (_x - (x0+x1)/2)**2 + (_y - (y0+y1)/2)**2
+            panels[min(candidates, key=_d_ext)]['rows'].append(r)
 
     return [p for p in panels if p['rows']]
 
