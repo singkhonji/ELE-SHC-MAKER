@@ -16,7 +16,25 @@ Notes:
 """
 
 import math
+import re
 import sys
+
+# AutoCAD special-character codes that appear in TEXT (not MTEXT) entities
+_ACAD_CODE = re.compile(r'%%[uUoO]')                    # underline / overline toggles
+_ACAD_DEG  = re.compile(r'%%[dD]')
+_ACAD_PM   = re.compile(r'%%[pP]')
+_ACAD_DIA  = re.compile(r'%%[cC]')
+_ACAD_MISC = re.compile(r'%%\d{3}')                    # numeric code fallback
+
+
+def _strip_acad_codes(text: str) -> str:
+    """Remove AutoCAD inline formatting codes from a raw TEXT entity value."""
+    text = _ACAD_CODE.sub('', text)     # drop %%U / %%O
+    text = _ACAD_DEG.sub('°', text)
+    text = _ACAD_PM.sub('±', text)
+    text = _ACAD_DIA.sub('Ø', text)
+    text = _ACAD_MISC.sub('', text)
+    return text.strip()
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 NOISE_MAX_LEN  = 1          # rows with text this short are dropped …
@@ -60,7 +78,7 @@ def parse_dxf(path: str) -> list[dict]:
     for e in msp:
         dt = e.dxftype()
         if dt == 'TEXT':
-            text  = (e.dxf.text or '').strip()
+            text  = _strip_acad_codes(e.dxf.text or '')
             ins   = e.dxf.insert
             rot   = _norm_rot(e.dxf.rotation)
             layer = e.dxf.layer

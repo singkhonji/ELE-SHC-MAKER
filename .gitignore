@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Input / output data — not version controlled
+input/
+output/
+
+# Diagnostic / scratch files
+_diag*.py
+_diag*.txt
+
+# Editor / OS
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

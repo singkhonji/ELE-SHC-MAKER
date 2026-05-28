@@ -142,7 +142,10 @@ if __name__ == '__main__':
     rows   = parse_dxf(sys.argv[1])
     panels = detect_panels(sys.argv[1], rows)
 
-    ckt = re.compile(r'^(P-)?\d+RYB$', re.IGNORECASE)
+    ckt = re.compile(
+        r'^(P-\d+RYB|\d+RYB|([A-Za-z][A-Za-z0-9]*-)?\d+R|\d{1,2})$',
+        re.IGNORECASE,
+    )
     print(f"Detected {len(panels)} panel(s)\n")
     for i, p in enumerate(panels, 1):
         b = p['bbox']
