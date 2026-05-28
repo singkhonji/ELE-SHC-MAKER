@@ -13,14 +13,92 @@ description: >
   uploads an .xls file described as coming from DWG Data Extraction of
   electrical drawings. Also trigger when the user says they have extracted data
   from AutoCAD and wants a load schedule output, even if they do not use the
-  exact skill name.
+  exact skill name. Additionally trigger on the DXF path: "แปลง dxf เป็น clean",
+  "clean dxf", "dxf to xlsx", "dxf to clean", "อ่าน dxf ทำตารางตู้", or whenever
+  the user uploads a `.dxf` saved from a DWG of electrical switchboard schematics
+  and wants the cabinets split and summarised. Trigger Stage 2 (Load Schedule
+  workbook) on: "สร้าง load schedule จาก clean", "ทำตารางโหลดจาก clean",
+  "clean to load schedule", "สร้างตารางโหลด แยก sheet", "ทำ index + diagram",
+  or when the user has a reviewed clean `.xlsx` and wants the final per-cabinet
+  Load Schedule workbook with an index page and a power-distribution diagram.
 ---
 
 # EE_SHC_EXTRACTOR — Electrical Switchboard Schedule Extractor
 
-Converts DWG Data Extraction XLS files (from AutoCAD electrical schematics)
-into formatted Load Schedule Excel workbooks. Supports **one or multiple
-boards** in a single XLS — each board becomes its own worksheet.
+Converts AutoCAD electrical switchboard schematics into structured Excel
+output. Two input paths:
+
+- **DXF path (Stage 1, preferred)** — read a DXF saved from the DWG, split
+  cabinets by their **real border rectangles**, and write a single **clean
+  review `.xlsx`** (per-circuit summary table per cabinet, separated by cabinet
+  headers). This replaces the manual, per-panel AutoCAD Data Extraction step.
+- **XLS path (legacy)** — read a per-panel Data Extraction `.xls` and build the
+  formatted Load Schedule workbook directly.
+
+Both paths support **one or multiple cabinets** in a single input file.
+
+---
+
+## DXF Path — Stage 1: DXF → clean `.xlsx`
+
+Entry point:
+
+```bash
+python scripts/run_clean.py <input.dxf> [more.dxf ...] [--output out.xlsx]
+```
+
+Pipeline:
+
+| Step | Script | Action |
+|---|---|---|
+| 1 | `parse_dxf.py` | Read DXF with **ezdxf**. `TEXT` → `e.dxf.text`; `MTEXT` → `e.plain_text()` (strips formatting codes natively — no regex needed). Resolve effective MTEXT rotation from its `text_direction` vector (group 11/21) so rotated cable annotations are detected. Drop single-char symbol noise on layer `0`. Returns `{t, x, y, rot, layer, type}` — `{t,x,y,rot}` are identical to `parse_xls`. |
+| 2 | `detect_panels.py` | Find each cabinet's **border rectangle**: a `LWPOLYLINE` whose bbox height exceeds 60% of the total drawing height. Assign every text row to the frame that contains it. Order left-to-right, then top-to-bottom. **Fallback** to `detect_boards.detect_boards()` (X-gap) if no frame is found. |
+| 3 | `parse_board.py` | **Reused unchanged** — extract board ID, supply, incomer CB, busbar, SPD/CT, cable sizes, accessories, and per-circuit data from each cabinet's rows. |
+| 4 | `build_clean_xlsx.py` | Write **one worksheet** (`Clean Summary`): for each cabinet, a dark-blue title bar (`ตู้ / CABINET: {id}`), an info line (Incomer / Busbar / Accessories / ⚠️ CABLE BY DC MEP), then a 10-column per-circuit table. SPARE circuits flagged; one blank spacer row between cabinets. |
+
+> The clean `.xlsx` is a **review artifact**: the user verifies the cabinet
+> split and per-circuit data before Stage 2 (Load Schedule) is run. Wiring the
+> clean output into the Load Schedule builder is planned for a later iteration.
+
+Why DXF over the legacy Data Extraction XLS:
+- One DXF for all cabinets vs. one manual export per cabinet.
+- Cabinet boundaries come from the **drawn border**, not a coordinate-gap
+  heuristic — robust regardless of drawing scale.
+- `MTEXT.plain_text()` is more reliable than the `parse_xls` regex cleaner.
+
+---
+
+## DXF Path — Stage 2: clean `.xlsx` → Load Schedule workbook
+
+Entry point:
+
+```bash
+python scripts/run_loadschedule.py <clean.xlsx> [--output LoadSchedule.xlsx]
+```
+
+Reads the **clean workbook from Stage 1 after the user has reviewed/edited it**
+and builds the final deliverable. The clean file is the single source of truth —
+**Stage 2 never invents data**: load names, Connected Load (kW) and Demand Factor
+that the user typed into the clean file flow straight through; anything left blank
+stays blank and is flagged `⚠️` for the M&E Engineer.
+
+| Step | Script | Action |
+|---|---|---|
+| 1 | `read_clean_xlsx.py` | Parse the (possibly edited) clean workbook back into board dicts. Keys off the stable `CABINET:` markers, the labelled header cells (`Supply Source:`, `Incomer CB:`, `Incomer Cable:`, `Busbar:`, `Accessories:`, `Flags:`) and the fixed 12-column circuit table. Tolerant of edited values + blank spacer rows. |
+| 2 | `build_loadschedule.py` | Build a multi-sheet workbook: **`INDEX`** (clickable list: Board ID, type, supply, circuit/active/spare counts, incomer, flags) → **`DIAGRAM`** (clickable box tree of the supply hierarchy, coloured by board type, ref-only nodes greyed) → **one Load Schedule sheet per cabinet** (reuses `build_excel._build_sheet` with `with_demand_formula=True` so Max Demand = `=G*H`). Every Board ID / diagram box is an internal `location` hyperlink; each board title bar links back to `INDEX`. |
+
+**Round-trip contract**: the user may edit *values* in the clean file but must keep
+the `CABINET:` markers, the header labels, the circuit-table columns, and the blank
+spacer rows intact (these are how `read_clean_xlsx.py` finds the structure).
+
+Hierarchy for the diagram is derived from `board['supply']` (parent) and any outgoing
+circuit whose Description matches `^D\d+-(SB|MDB|DB|EMSB)-` (child). Boards present
+as sheets are clickable; referenced-only boards (e.g. downstream DBs not in the DXF)
+are shown as greyed `(ref)` boxes.
+
+---
+
+## XLS Path (legacy) — DWG Data Extraction XLS → Load Schedule
 
 ---
 
@@ -175,8 +253,15 @@ Output file naming convention:
 ## References
 
 - `references/column_spec.md` — 14-column output spec + colour codes
-- `references/mtext_cleaning.md` — MText formatting code stripping rules
-- `scripts/parse_xls.py` — Step 2: read & clean XLS
-- `scripts/detect_boards.py` — Step 3: multi-board detection
-- `scripts/parse_board.py` — Step 4: per-board data extraction
-- `scripts/build_excel.py` — Step 5: Excel output builder
+- `references/mtext_cleaning.md` — MText formatting code stripping rules (legacy XLS path only)
+- `scripts/run_clean.py` — Stage 1 entry: DXF → clean review `.xlsx`
+- `scripts/parse_dxf.py` — Stage 1: read & clean via ezdxf
+- `scripts/detect_panels.py` — Stage 1: cabinet split by border rectangle
+- `scripts/build_clean_xlsx.py` — Stage 1: clean review workbook (round-trippable)
+- `scripts/run_loadschedule.py` — Stage 2 entry: clean `.xlsx` → Load Schedule workbook
+- `scripts/read_clean_xlsx.py` — Stage 2: parse clean `.xlsx` → board dicts
+- `scripts/build_loadschedule.py` — Stage 2: INDEX + DIAGRAM + per-board sheets
+- `scripts/parse_xls.py` — XLS: read & clean
+- `scripts/detect_boards.py` — XLS: multi-board detection (X-gap)
+- `scripts/parse_board.py` — shared: per-board data extraction
+- `scripts/build_excel.py` — Load Schedule output builder

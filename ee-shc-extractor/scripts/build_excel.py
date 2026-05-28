@@ -38,6 +38,12 @@ _thin = Side(style='thin', color='BFBFBF')
 _bdr  = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 
 
+def sheet_name(bid: str) -> str:
+    """Excel-safe worksheet name (≤31 chars, no special chars). Shared so that
+    hyperlinks built elsewhere match the actual sheet titles."""
+    return re.sub(r'[\\/*?:\[\]]', '-', bid or 'Board')[:31]
+
+
 def _cs(ws, r, c, v='', bold=False, italic=False, fc='000000',
         bg=None, ha='center', wrap=False, sz=9):
     cell = ws.cell(row=r, column=c, value=v)
@@ -68,7 +74,7 @@ def _col_headers(ws, row):
 
 
 # ─── Sheet builder ────────────────────────────────────────────────────────────
-def _build_sheet(ws, bdata: dict, tab_color: str):
+def _build_sheet(ws, bdata: dict, tab_color: str, with_demand_formula: bool = False):
     ws.sheet_properties.tabColor = tab_color
 
     # Col widths
@@ -145,14 +151,20 @@ def _build_sheet(ws, bdata: dict, tab_color: str):
         spare = d.get('spare', False)
         bg    = SPARE_BG if spare else (LT_BLUE if i % 2 == 0 else WHITE)
         fc_t  = '7F7F7F' if spare else '000000'
+        conn = d.get('conn_load', '')
+        dem  = d.get('demand', '')
         row_v = [
-            ckt, d['desc'], d['cb_a'], 'MCCB', '3P+N', d['cb_brk'],
-            '', '', '', '',
-            d['cable'], d['route'], '', d['status'],
+            ckt, d.get('desc', ''), d.get('cb_a', '--'), 'MCCB', '3P+N',
+            d.get('cb_brk', '36kA'),
+            conn, dem, '', '',
+            d.get('cable', '--'), d.get('route', '--'), '', d.get('status', ''),
         ]
         for ci, v in enumerate(row_v, 1):
             _cs(ws, r, ci, v, bold=(ci == 1), italic=spare, bg=bg, fc=fc_t,
                 ha='left' if ci in (2, 11, 12) else 'center', wrap=True)
+        # Max Demand = Connected Load × Demand Factor (computes when M&E fills G/H)
+        if with_demand_formula and not spare:
+            ws.cell(row=r, column=9).value = f'=G{r}*H{r}'
 
     # ── Section C: Accessories ────────────────────────────────────────────
     ac_start = 12 + len(circuits)
@@ -236,15 +248,14 @@ def build_excel(boards_data: list[dict], output_path: str) -> str:
 
     for i, bdata in enumerate(boards_data):
         bid = bdata.get('id') or f'Board_{i+1}'
-        # Sanitise sheet name (Excel limit: 31 chars, no special chars)
-        sheet_name = re.sub(r'[\\/*?:\[\]]', '-', bid)[:31]
+        sname     = sheet_name(bid)
         tab_color  = TAB_COLORS[i % len(TAB_COLORS)]
 
         if i == 0:
             ws = wb.active
-            ws.title = sheet_name
+            ws.title = sname
         else:
-            ws = wb.create_sheet(sheet_name)
+            ws = wb.create_sheet(sname)
 
         _build_sheet(ws, bdata, tab_color)
 

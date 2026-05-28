@@ -10,6 +10,53 @@ A collection of Claude Code skills for electrical engineering document workflows
 
 Converts **DWG Data Extraction XLS files** (exported from AutoCAD electrical schematics) into formatted **Load Schedule Excel workbooks** (`.xlsx`), one worksheet per distribution board.
 
+#### Two input paths
+
+| Path | Source | Stage 1 | Stage 2 |
+|---|---|---|---|
+| **DXF** (preferred) | Save DWG → `.dxf` (all panels in one file) | `run_clean.py` → **clean review `.xlsx`** | `run_loadschedule.py` → **Load Schedule workbook** |
+| **XLS** (legacy) | AutoCAD Data Extraction `.xls` per panel | — | `run.py` / `run_multi.py` → Load Schedule |
+
+The **DXF path** removes the manual, per-panel Data Extraction step: it reads one
+DXF, splits cabinets by their **real border rectangles**, and writes a single
+**clean review workbook** — a per-circuit summary table per cabinet, separated by
+cabinet headers — so the cabinet split can be verified before the Load Schedule is
+built.
+
+##### clean `.xlsx` → Load Schedule workbook (Stage 2)
+
+```bash
+python scripts/run_loadschedule.py <clean.xlsx> [--output LoadSchedule.xlsx]
+```
+
+Reads the **(user-reviewed/edited)** clean workbook from Stage 1 and produces the
+final workbook. Stage 2 is **round-trippable**: it never invents data — whatever
+the user fills into the clean file (load names, Connected Load kW, Demand Factor)
+flows straight through; anything missing stays blank/flagged `⚠️`.
+
+| Step | Script | Action |
+|---|---|---|
+| 1 | `read_clean_xlsx.py` | Parses the clean workbook back into board dicts (keys off the `CABINET:` markers + labelled header cells + fixed circuit columns) |
+| 2 | `build_loadschedule.py` | Builds the workbook: **INDEX** sheet (clickable list of cabinets) + **DIAGRAM** sheet (clickable box tree of the supply hierarchy) + **one Load Schedule sheet per cabinet** (reuses `build_excel._build_sheet`, adds `=G*H` Max-Demand formulas and ← INDEX nav) |
+
+Output: `INDEX` and `DIAGRAM` first, then one tab per board; every Board ID /
+diagram box is an internal hyperlink, and each board title bar links back to `INDEX`.
+
+##### DXF → clean `.xlsx` (Stage 1)
+
+```bash
+python scripts/run_clean.py <input.dxf> [more.dxf ...] [--output out.xlsx]
+```
+
+| Step | Script | Action |
+|---|---|---|
+| 1 | `parse_dxf.py` | Reads DXF via **ezdxf**; `MTEXT.plain_text()` strips formatting codes natively; resolves the effective MTEXT rotation from its `text_direction` vector; drops single-char symbol noise (layer `0`) |
+| 2 | `detect_panels.py` | Detects each cabinet's **border rectangle** (large `LWPOLYLINE`) and assigns every text entity to the frame that contains it (falls back to legacy X-gap clustering if no frame is found) |
+| 3 | `parse_board.py` | (reused) extracts board ID, supply, incomer, CB ratings, cable sizes, accessories per cabinet |
+| 4 | `build_clean_xlsx.py` | Writes **one sheet**: per-cabinet header bar + info line, then a per-circuit table; SPARE rows flagged; blank spacer between cabinets |
+
+Requires `ezdxf` (`pip install ezdxf`).
+
 #### Trigger phrases
 
 Use `/ee-shc-extractor` or say any of:
@@ -64,23 +111,32 @@ ee-shc-extractor/
 │   ├── column_spec.md              ← 14-column output spec + colour palette
 │   └── mtext_cleaning.md           ← MText formatting code stripping rules
 └── scripts/
-    ├── run.py                      ← Main entry point (full pipeline)
-    ├── parse_xls.py                ← Step 1: read & clean XLS
-    ├── detect_boards.py            ← Step 2: multi-board detection
-    ├── parse_board.py              ← Step 3: per-board data extraction
-    └── build_excel.py              ← Step 4: Excel output builder
+    ├── run_clean.py                ← Stage 1 entry: DXF → clean review .xlsx
+    ├── parse_dxf.py                ← Stage 1: read & clean DXF via ezdxf
+    ├── detect_panels.py            ← Stage 1: cabinet split by border rectangle
+    ├── build_clean_xlsx.py         ← Stage 1: clean review workbook (round-trippable)
+    ├── run_loadschedule.py         ← Stage 2 entry: clean .xlsx → Load Schedule workbook
+    ├── read_clean_xlsx.py          ← Stage 2: parse clean .xlsx → board dicts
+    ├── build_loadschedule.py       ← Stage 2: INDEX + DIAGRAM + per-board sheets
+    ├── run.py                      ← XLS path entry (full Load Schedule pipeline)
+    ├── run_multi.py                ← XLS path: combine multiple XLS into one workbook
+    ├── parse_xls.py                ← XLS: read & clean
+    ├── detect_boards.py            ← XLS: X-gap multi-board detection
+    ├── parse_board.py              ← shared: per-board data extraction
+    └── build_excel.py              ← shared: per-board sheet + sheet_name() helper
 ```
 
 #### Dependencies
 
 ```
-xlrd       # read .xls files
+ezdxf      # read .dxf files (DXF path)
+xlrd       # read .xls files (legacy XLS path)
 openpyxl   # write .xlsx files
 ```
 
 Install with:
 ```bash
-pip install xlrd openpyxl
+pip install ezdxf xlrd openpyxl
 ```
 
 #### Tunable parameters
